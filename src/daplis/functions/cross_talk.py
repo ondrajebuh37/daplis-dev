@@ -1091,6 +1091,242 @@ def _plot_average_cross_talk_vs_distance(
     return final_result_averages
 
 
+def cross_talk_offset_collect(
+    path: str,
+    rewrite: bool,
+    daughterboard_number: str,
+    motherboard_number: str,
+    firmware_version: str,
+    timestamps: int,
+    include_offset: bool = False,
+    delta_window: float = 50e3,
+    apply_calibration: bool = True,
+    absolute_timestamps: bool = False,
+    correct_pix_address: bool = False,
+):
+    """Collect timestamp differences from cross-talk data.
+
+    For all phixels, collect all timestamp differences
+    for pairs of nearest neighbor pixels, where the pixels are selected 
+    such as follows : (0,1), (1,2) ,.. etc.
+
+    Parameters
+    ----------
+    path : str
+        Path to the folder with the '.dat' data files.
+    rewrite : bool
+        Switch for rewriting the feather file with timestamp differences.
+        Used for conscious start of an hours-long data processing and
+        avoiding rewriting/deleting already existing files.
+    daughterboard_number : str
+        LinoSPAD2 daughterboard number.
+    motherboard_number : str
+        LinoSPAD2 motherboard (FPGA) number, including the '#'.
+    firmware_version : str
+        LinoSPAD2 firmware version.
+    timestamps : int
+        Number of timestamps per TDC per cycle used during data
+        collection.
+    include_offset : bool
+        Switch for including the offset calibration. The default is
+        False.
+    delta_window : float, optional
+        Window size for collecting timestamp differences. The default
+        is 50e3.
+    apply_calibration : bool, optional
+        Switch for applying callibration. The default is True.
+    absolute_timestamps : bool, optional
+        Indicator of data collected with absolute timestamps. The
+        default is False.
+    correct_pix_address : bool, optional
+        Correct pixel address for the FPGA board on side 23. Here
+        used to reverse the correction. The default is False.
+    """
+
+    # Define matrix of pixel coordinates, where rows are numbers of TDCs
+    # and columns are the pixels that connected to these TDCs
+    if firmware_version == "2212s":
+        pass
+    elif firmware_version == "2212b":
+        print(
+            "\nFor firmware version '2212b' cross-talk numbers "
+            "would be incorrect, try data collected with '2212s'"
+        )
+        sys.exit()
+    else:
+        print(
+            "\nFirmware version is not recognized. For cross-talk "
+            "calculations, firmware version '2212s' should be used."
+        )
+        sys.exit()
+
+    print("\n> > > Collecting cross-talk data < < <\n")
+
+    # Reverse correction if the motherboard connected to side "23" of the
+    # daughterboard
+
+    print("Creating pixel pairs from 0 to 255")
+    pix_pairs = [[i, i+1] for i in range(255)]
+    if correct_pix_address:
+        for pi, pixels in enumerate(pix_pairs):
+            for i, pixel in enumerate(pixels):
+                if pixel > 127:
+                    pixels[i] = 255 - pixel
+                else:
+                    pixels[i] = pixel + 128
+            pix_pairs[pi] = pixels
+    # Collecting sensor population
+    os.chdir(path)
+    files = glob.glob("*.dat")
+    sensor_plot.collect_data_and_apply_mask(
+        files,
+        daughterboard_number,
+        motherboard_number,
+        firmware_version,
+        timestamps,
+        app_mask=False,
+        save_to_file=True,
+        absolute_timestamps=absolute_timestamps,
+        correct_pix_address=correct_pix_address,
+    )
+
+
+    print(
+        "Calculating timestamp differences between all pixels"
+    )
+    for pix_pair in pix_pairs:
+        _collect_cross_talk(
+            path,
+            pix_pair,
+            rewrite,
+            daughterboard_number,
+            motherboard_number,
+            firmware_version,
+            timestamps,
+            delta_window,
+            include_offset,
+            apply_calibration,
+            absolute_timestamps,
+            correct_pix_address,
+        )
+
+def gaussian(x, a, mu, sigma, c):
+    return a * np.exp(-((x - mu) ** 2) / (2 * sigma ** 2)) + c
+
+def cross_talk_offset_plot(path: str, pixel_pair: list, 
+        multiplier : int = 10, window: float = 50e3, show_plot: bool = True):
+    """
+    Fit a Gaussian to the timestamp differences between two specified pixels and plot the result.
+
+    Parameters
+    ----------
+    path : str
+        Path to the folder with the '.dat' data files.
+    pixel_pair : list
+        List with two pixel numbers, [aggressor, victim].
+    multiplier : int
+        Multiplier for histogram binning.
+    window : float, optional
+        Window length for histogram range, default is 50e3.
+    show_plot : bool, optional
+        Whether to show the plot, default is True.
+
+    Returns
+    -------
+    tuple
+        (mu, sigma) of the Gaussian fit.
+    """
+    os.chdir(os.path.join(path, "cross_talk_data"))
+    
+    ft_file_pattern = f"*_{pixel_pair[0]}-{pixel_pair[1]}*.feather"
+    ft_files = glob.glob(ft_file_pattern)
+    if not ft_files:
+        raise FileNotFoundError(f"No feather file found matching pattern {ft_file_pattern}")
+    
+    ft_file = ft_files[0]
+    
+    data_col = f"{pixel_pair[0]},{pixel_pair[1]}"
+    data_pix = pd.read_feather(ft_file, columns=[data_col]).dropna().values.flatten()
+    data_cut = data_pix[(data_pix > -window / 2) & (data_pix < window / 2)]
+    
+    if len(data_cut) == 0:
+        raise ValueError("No valid data points found within the specified window.")
+    
+    counts, bin_edges = np.histogram(
+        data_cut,
+        bins=np.arange(np.min(data_cut), np.max(data_cut), multiplier * 2500 / 140),
+    )
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    try:
+        params, _ = curve_fit(
+            gaussian, bin_centers, counts,
+            p0=[np.max(counts), bin_centers[np.argmax(counts)], 100, np.median(counts)],
+        )
+        mu, sigma = params[1], params[2]
+    except (RuntimeError, TypeError):
+        raise RuntimeError("Gaussian fit failed.")
+    
+    if show_plot:
+        plt.figure(figsize=(10, 6))
+        plt.step(bin_centers, counts, color="rebeccapurple", label="Data")
+        plt.plot(bin_centers, gaussian(bin_centers, *params), color="darkorange", label="Gaussian Fit")
+        plt.title(f"Gaussian Fit for Pixels {pixel_pair[0]}, {pixel_pair[1]}")
+        plt.xlabel("Δt (ps)")
+        plt.ylabel("Counts")
+        # plt.legend()
+        plt.show()
+    
+    return mu, sigma
+
+
+def plot_overlayed_data(path: str, pixels: list, show_plot: bool, multiplier: int = 10, window: float = 50e3):
+    os.chdir(os.path.join(path, "cross_talk_data"))
+    ft_file_pattern = f"*_{pixels[0]}-{pixels[1]}*.feather"
+    ft_files = glob.glob(ft_file_pattern)
+
+    ft_file = ft_files[0]
+    data_col = f"{pixels[0]},{pixels[1]}"
+    data_pix = pd.read_feather(ft_file, columns=[data_col]).dropna().values.flatten()
+    data_cut = data_pix[(data_pix > -window / 2) & (data_pix < window / 2)]
+    
+    counts, bin_edges = np.histogram(
+        data_cut,
+        bins=np.arange(np.min(data_cut), np.max(data_cut), multiplier * 2500 / 140),
+    )
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    plt.plot(bin_centers, counts, label=f"Pixels {pixels[0]}-{pixels[1]}")
+    
+    plt.title("Overlayed Cross-Talk Data")
+    plt.xlabel("Δt (ps)")
+    plt.ylabel("Counts")
+    # plt.legend()
+    if show_plot:
+        plt.show()
+
+def plot_normalized_data(path: str, pixels: list, mu: float, multiplier: int = 10, window: float = 50e3):
+    os.chdir(os.path.join(path, "cross_talk_data"))
+    ft_file_pattern = f"*_{pixels[0]}-{pixels[1]}*.feather"
+    ft_files = glob.glob(ft_file_pattern)
+
+    ft_file = ft_files[0]
+    data_col = f"{pixels[0]},{pixels[1]}"
+    data_pix = pd.read_feather(ft_file, columns=[data_col]).dropna().values.flatten()
+    data_cut = data_pix[(data_pix > -window / 2) & (data_pix < window / 2)]
+    
+    counts, bin_edges = np.histogram(
+        data_cut - mu,  # Normalized by subtracting mu
+        bins=np.arange(np.min(data_cut - mu), np.max(data_cut - mu), multiplier * 2500 / 140),
+    )
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    plt.plot(bin_centers, counts, label=f"Pixels {pixels[0]}-{pixels[1]}")
+    
+    plt.title("Normalized Cross-Talk Data (Mean Subtracted)")
+    plt.xlabel("Δt - μ (ps)")
+    plt.ylabel("Counts")
+    # plt.legend()
+
+
 def zero_to_cross_talk_collect(
     path: str,
     pixels: List[int],
