@@ -1244,13 +1244,14 @@ def cross_talk_offset_plot(path: str, pixel_pair: list,
         raise FileNotFoundError(f"No feather file found matching pattern {ft_file_pattern}")
     
     ft_file = ft_files[0]
-    
     data_col = f"{pixel_pair[0]},{pixel_pair[1]}"
     data_pix = pd.read_feather(ft_file, columns=[data_col]).dropna().values.flatten()
     data_cut = data_pix[(data_pix > -window / 2) & (data_pix < window / 2)]
     
     if len(data_cut) == 0:
-        raise ValueError("No valid data points found within the specified window.")
+        # print("DEAD PIXEL", pixel_pair)
+        return 0, 1
+        # raise ValueError("No valid data points found within the specified window.")
     
     counts, bin_edges = np.histogram(
         data_cut,
