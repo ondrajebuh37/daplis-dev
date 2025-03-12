@@ -1282,6 +1282,7 @@ def cross_talk_offset_plot(path: str, pixel_pair: list,
 
 
 def plot_overlayed_data(path: str, pixels: list, show_plot: bool, multiplier: int = 10, window: float = 50e3):
+    
     os.chdir(os.path.join(path, "cross_talk_data"))
     ft_file_pattern = f"*_{pixels[0]}-{pixels[1]}*.feather"
     ft_files = glob.glob(ft_file_pattern)
@@ -1290,7 +1291,9 @@ def plot_overlayed_data(path: str, pixels: list, show_plot: bool, multiplier: in
     data_col = f"{pixels[0]},{pixels[1]}"
     data_pix = pd.read_feather(ft_file, columns=[data_col]).dropna().values.flatten()
     data_cut = data_pix[(data_pix > -window / 2) & (data_pix < window / 2)]
-    
+    if len(data_cut) == 0:
+        #TODO this is for dead pixel pairs
+        return 0
     counts, bin_edges = np.histogram(
         data_cut,
         bins=np.arange(np.min(data_cut), np.max(data_cut), multiplier * 2500 / 140),
@@ -1314,7 +1317,9 @@ def plot_normalized_data(path: str, pixels: list, mu: float, multiplier: int = 1
     data_col = f"{pixels[0]},{pixels[1]}"
     data_pix = pd.read_feather(ft_file, columns=[data_col]).dropna().values.flatten()
     data_cut = data_pix[(data_pix > -window / 2) & (data_pix < window / 2)]
-    
+    if len(data_cut) == 0:
+        #TODO this is for dead pixel pairs
+        return 0
     counts, bin_edges = np.histogram(
         data_cut - mu,  # Normalized by subtracting mu
         bins=np.arange(np.min(data_cut - mu), np.max(data_cut - mu), multiplier * 2500 / 140),
